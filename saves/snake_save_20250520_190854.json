@@ -1,0 +1,37 @@
+{
+  "mode": "single_player",
+  "timestamp": "2025-05-20T19:08:54.032025",
+  "snake_data": {
+    "body": [
+      [
+        18.0,
+        5.0
+      ],
+      [
+        17.0,
+        5.0
+      ],
+      [
+        16.0,
+        5.0
+      ],
+      [
+        15.0,
+        5.0
+      ]
+    ],
+    "direction": [
+      1.0,
+      0.0
+    ],
+    "color": [
+      0,
+      231,
+      255
+    ],
+    "score": 1,
+    "level": 1,
+    "projectiles_available": 4,
+    "projectile_cooldown": 57
+  }
+}

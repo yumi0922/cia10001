@@ -320,6 +320,81 @@ class Game:
         score2_rect = score2_text.get_rect(topright=(SCREEN_SIZE-20, 20))
         screen.blit(score2_text, score2_rect)
 
+def load_saved_game(save_data):
+    """Load a saved multiplayer game."""
+    if save_data['mode'] != 'multiplayer':
+        print("Error: Not a multiplayer save file")
+        return
+    
+    # Create game instance with saved snake colors
+    game = Game(SNAKE_COLORS["Sky Blue"], SNAKE_COLORS["Pink"])  # Default colors for now
+    
+    # Restore snake1 state
+    snake1_data = save_data['snake1_data']
+    game.snake1.body = [Vector2(x, y) for x, y in snake1_data['positions']]
+    game.snake1.direction = Vector2(snake1_data['direction'][0], snake1_data['direction'][1])
+    game.snake1.score = snake1_data['score']
+    game.snake1.stunned = snake1_data['stunned']
+    game.snake1.projectiles_available = snake1_data['projectiles']
+    
+    # Restore snake2 state
+    snake2_data = save_data['snake2_data']
+    game.snake2.body = [Vector2(x, y) for x, y in snake2_data['positions']]
+    game.snake2.direction = Vector2(snake2_data['direction'][0], snake2_data['direction'][1])
+    game.snake2.score = snake2_data['score']
+    game.snake2.stunned = snake2_data['stunned']
+    game.snake2.projectiles_available = snake2_data['projectiles']
+    
+    # Restore food position
+    game.food.pos = Vector2(save_data['food_pos'][0], save_data['food_pos'][1])
+    
+    # Restore projectiles
+    game.projectiles = [
+        Projectile(Vector2(x, y), Vector2(dx, dy), None)
+        for x, y, dx, dy in save_data['projectiles']
+    ]
+    
+    # Start game loop
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.KEYDOWN:
+                # Player 1 controls (Arrow keys + SPACE)
+                if game.snake1.alive and game.snake1.stunned <= 0:
+                    if event.key == pygame.K_UP and game.snake1.direction.y != 1:
+                        game.snake1.direction = Vector2(0, -1)
+                    if event.key == pygame.K_DOWN and game.snake1.direction.y != -1:
+                        game.snake1.direction = Vector2(0, 1)
+                    if event.key == pygame.K_LEFT and game.snake1.direction.x != 1:
+                        game.snake1.direction = Vector2(-1, 0)
+                    if event.key == pygame.K_RIGHT and game.snake1.direction.x != -1:
+                        game.snake1.direction = Vector2(1, 0)
+                    if event.key == pygame.K_SPACE:  # Shoot projectile
+                        proj = game.snake1.shoot_projectile()
+                        if proj:
+                            game.projectiles.append(proj)
+                
+                # Player 2 controls (WASD + SHIFT)
+                if game.snake2.alive and game.snake2.stunned <= 0:
+                    if event.key == pygame.K_w and game.snake2.direction.y != 1:
+                        game.snake2.direction = Vector2(0, -1)
+                    if event.key == pygame.K_s and game.snake2.direction.y != -1:
+                        game.snake2.direction = Vector2(0, 1)
+                    if event.key == pygame.K_a and game.snake2.direction.x != 1:
+                        game.snake2.direction = Vector2(-1, 0)
+                    if event.key == pygame.K_d and game.snake2.direction.x != -1:
+                        game.snake2.direction = Vector2(1, 0)
+                    if event.key == pygame.K_LSHIFT:  # Shoot projectile
+                        proj = game.snake2.shoot_projectile()
+                        if proj:
+                            game.projectiles.append(proj)
+        
+        game.update()
+        game.draw()
+        clock.tick(60)
+
 # Main game
 def main():
     # Get player color choices

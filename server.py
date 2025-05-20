@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 import random
 from collections import deque
+from save_game import save_multiplayer_game, load_game
 
 @dataclass
 class GameState:
@@ -38,11 +39,32 @@ class Room:
     single_player: bool
 
 class LobbyServer:
-    def __init__(self, host='0.0.0.0', port=5555):
+    def __init__(self, host='0.0.0.0', start_port=5556):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.bind((host, port))
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # Try to find an available port
+        port = start_port
+        max_attempts = 20
+        for attempt in range(max_attempts):
+            try:
+                # Try to bind to port 0 to let OS choose an available port
+                self.server.bind((host, 0))
+                actual_port = self.server.getsockname()[1]
+                print(f"Server started on {host}:{actual_port}")
+                break
+            except OSError as e:
+                if attempt == max_attempts - 1:
+                    raise Exception("Could not find an available port")
+                print(f"Error binding to port: {e}")
+                self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+        # Write the port number to a file so clients can find it
+        with open('server_port.txt', 'w') as f:
+            f.write(str(actual_port))
+        
         self.server.listen(10)  # Allow more connections for lobby
-        print(f"Server started on {host}:{port}")
         
         self.rooms: Dict[str, Room] = {}
         self.client_to_room: Dict[socket.socket, str] = {}
@@ -86,10 +108,13 @@ class LobbyServer:
             single_player=single_player
         )
         
-        # For single player mode, automatically set as ready
+        # For single player mode, automatically set as ready and start game
         if single_player:
             room.host_ready = True
             room.guest_ready = True
+            room.in_game = True
+            start_msg = {"command": "start_game", "player_number": 1}
+            room.host.send(pickle.dumps(start_msg))
         
         self.rooms[room_id] = room
         self.client_to_room[host] = room_id
@@ -124,62 +149,72 @@ class LobbyServer:
         try:
             while True:
                 try:
-                    data = pickle.loads(client.recv(4096))
-                    cmd = data.get("command")
+                    data = pickle.loads(client.recv(2048))
+                    if not data:
+                        break
                     
-                    with self.lock:
-                        if cmd == "list_rooms":
-                            # Send room list
-                            response = {"command": "room_list", "rooms": self.get_room_list()}
-                            client.send(pickle.dumps(response))
-                            
-                        elif cmd == "create_room":
-                            # Create new room
-                            room_id = self.create_room(client, data["room_name"], data["single_player"])
-                            response = {"command": "room_created", "room_id": room_id}
-                            client.send(pickle.dumps(response))
-                            
-                        elif cmd == "join_room":
-                            # Try to join room
-                            success = self.join_room(client, data["room_id"])
-                            if success:
-                                room = self.rooms[data["room_id"]]
-                                # Notify host
-                                host_msg = {"command": "player_joined"}
-                                room.host.send(pickle.dumps(host_msg))
-                                # Notify guest
-                                guest_msg = {"command": "joined_room", "room_id": room.id}
-                                client.send(pickle.dumps(guest_msg))
+                    if "command" not in data:
+                        continue
+                        
+                    command = data["command"]
+                    
+                    if command == "create_room":
+                        room_id = self.create_room(client, data["room_name"], data.get("single_player", False))
+                        room = self.rooms[room_id]
+                        room.host = client
+                        client.send(pickle.dumps({"command": "room_created", "room_id": room_id}))
+                        
+                    elif command == "join_room":
+                        room_id = data["room_id"]
+                        if room_id in self.rooms:
+                            room = self.rooms[room_id]
+                            if not room.guest:
+                                room.guest = client
+                                # Notify both players that game can start
+                                start_msg = {"command": "start_game"}
+                                room.host.send(pickle.dumps(start_msg))
+                                room.guest.send(pickle.dumps(start_msg))
                             else:
-                                error_msg = {"command": "error", "message": "Could not join room"}
-                                client.send(pickle.dumps(error_msg))
+                                client.send(pickle.dumps({"command": "error", "message": "Room full"}))
+                        else:
+                            client.send(pickle.dumps({"command": "error", "message": "Room not found"}))
+                    
+                    elif command == "save_game":
+                        room = self.get_room_for_client(client)
+                        if room and room.game_state:
+                            save_path = save_multiplayer_game(room.game_state)
+                            msg = {"command": "game_saved", "save_path": save_path}
+                            room.host.send(pickle.dumps(msg))
+                            if room.guest:
+                                room.guest.send(pickle.dumps(msg))
+                    
+                    elif command == "ready":
+                        # Handle player ready
+                        room_id = self.client_to_room.get(client)
+                        if room_id:
+                            room = self.rooms[room_id]
+                            if client == room.host:
+                                room.host_ready = True
+                            elif client == room.guest:
+                                room.guest_ready = True
                                 
-                        elif cmd == "ready":
-                            # Handle player ready
-                            room_id = self.client_to_room.get(client)
-                            if room_id:
-                                room = self.rooms[room_id]
-                                if client == room.host:
-                                    room.host_ready = True
-                                elif client == room.guest:
-                                    room.guest_ready = True
-                                    
-                                # If both ready, start game
-                                if room.host_ready and room.guest_ready:
-                                    room.in_game = True
-                                    start_msg = {"command": "start_game", "player_number": 1}
-                                    room.host.send(pickle.dumps(start_msg))
+                            # If both ready, start game
+                            if room.host_ready and room.guest_ready:
+                                room.in_game = True
+                                start_msg = {"command": "start_game", "player_number": 1}
+                                room.host.send(pickle.dumps(start_msg))
+                                if not room.single_player:
                                     start_msg["player_number"] = 2
                                     room.guest.send(pickle.dumps(start_msg))
-                                    
-                        elif cmd == "game_input":
-                            # Handle game input
-                            room_id = self.client_to_room.get(client)
-                            if room_id:
-                                room = self.rooms[room_id]
-                                if room.in_game:
-                                    self.handle_game_input(room, client, data)
-                                    
+                                
+                    elif command == "game_input":
+                        # Handle game input
+                        room_id = self.client_to_room.get(client)
+                        if room_id:
+                            room = self.rooms[room_id]
+                            if room.in_game:
+                                self.handle_game_input(room, client, data)
+                                
                 except (EOFError, pickle.UnpicklingError):
                     pass
                     
@@ -354,10 +389,19 @@ class LobbyServer:
         # Start game update thread
         threading.Thread(target=self.update_games, daemon=True).start()
         
+        player_count = 0
         while True:
-            client, addr = self.server.accept()
-            print(f"New connection from {addr}")
-            threading.Thread(target=self.handle_client, args=(client,)).start()
+            try:
+                client, addr = self.server.accept()
+                print(f"New connection from {addr}")
+                player_count += 1
+                # Send player number immediately
+                client.send(pickle.dumps(player_count))
+                # Start client handler thread
+                threading.Thread(target=self.handle_client, args=(client,), daemon=True).start()
+            except Exception as e:
+                print(f"Error accepting client: {e}")
+                continue
 
 if __name__ == "__main__":
     server = LobbyServer()

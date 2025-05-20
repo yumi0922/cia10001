@@ -1,8 +1,13 @@
+from turtle import Screen
 import pygame
 import socket
 import pickle
 import sys
 from pygame.math import Vector2
+import threading
+from save_game import load_game
+
+from single_player import MAX_PROJECTILES, PROJECTILE_COOLDOWN, Projectile
 
 # Initialize Pygame
 pygame.init()
@@ -35,16 +40,49 @@ SNAKE_COLORS = {
 }
 
 class Client:
-    def __init__(self, host='localhost', port=5555):
+    def __init__(self, host='localhost', start_port=5556):
         self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.single_player = '--single-player' in sys.argv
+        
+        # Try to read port from file
         try:
+            with open('server_port.txt', 'r') as f:
+                port = int(f.read().strip())
+            print(f"Found server port: {port}")
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Could not read server port: {e}")
+            sys.exit(1)
+            
+        # Try to connect to server
+        try:
+            print(f"Connecting to {host}:{port}...")
             self.client.connect((host, port))
             print("Connected to server!")
-            self.player_number = pickle.loads(self.client.recv(4096))
-            print(f"You are Player {self.player_number}")
         except Exception as e:
             print(f"Could not connect to server: {e}")
-            sys.exit()
+            sys.exit(1)
+
+        try:
+            if self.single_player:
+                # Create single player room
+                self.client.send(pickle.dumps({
+                    "command": "create_room",
+                    "room_name": "Single Player",
+                    "single_player": True
+                }))
+                response = pickle.loads(self.client.recv(4096))
+                if response.get("command") == "room_created":
+                    print("Created single player room")
+                    self.player_number = 1
+                else:
+                    print("Failed to create single player room")
+                    sys.exit(1)
+            else:
+                self.player_number = pickle.loads(self.client.recv(4096))
+            print(f"You are Player {self.player_number}")
+        except Exception as e:
+            print(f"Error during initialization: {e}")
+            sys.exit(1)
 
         # Setup display
         self.screen = pygame.display.set_mode((SCREEN_SIZE, SCREEN_SIZE + CHAT_HEIGHT))
@@ -276,9 +314,180 @@ class Client:
         pygame.quit()
         sys.exit()
 
+    def handle_events(self):
+        """Handle pygame events."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+                pygame.quit()
+                sys.exit()
+                
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_s:  # Save game
+                    self.send_command("save_game")
+                elif event.key == pygame.K_ESCAPE:
+                    self.running = False
+                    pygame.quit()
+                    sys.exit()
+                elif self.game_state:  # Only handle game input if we have a game state
+                    if event.key in [pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT]:
+                        direction = {
+                            pygame.K_UP: (0, -1),
+                            pygame.K_DOWN: (0, 1),
+                            pygame.K_LEFT: (-1, 0),
+                            pygame.K_RIGHT: (1, 0)
+                        }[event.key]
+                        self.send_command("game_input", {"direction": direction})
+                    elif event.key == pygame.K_SPACE:  # Shoot projectile
+                        self.send_command("game_input", {"shoot": True})
+
+    def handle_server_message(self, msg):
+        """Handle message from server."""
+        if msg["command"] == "start_game":
+            print("Game starting!")
+            self.game_state = None
+        elif msg["command"] == "game_state":
+            self.game_state = msg["state"]
+        elif msg["command"] == "game_saved":
+            print(f"Game saved to: {msg['save_path']}")
+        elif msg["command"] == "error":
+            print(f"Error: {msg['message']}")
+
+class Snake:
+    def __init__(self, pos, color):
+        self.body = [Vector2(pos[0], pos[1])]
+        self.direction = Vector2(1, 0)
+        self.color = color
+        self.alive = True
+        self.score = 0
+        self.stunned = 0
+        self.projectiles = MAX_PROJECTILES
+        self.projectile_cooldown = 0
+        
+        # Add initial body segments
+        for i in range(2):
+            self.body.append(Vector2(self.body[0].x - (i + 1), self.body[0].y))
+    
+    def draw(self):
+        # Draw body segments
+        for segment in self.body[1:]:
+            rect = pygame.Rect(segment.x * CELL_SIZE, segment.y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+            pygame.draw.rect(Screen, self.color, rect, border_radius=8)
+        
+        # Draw head
+        head_rect = pygame.Rect(self.body[0].x * CELL_SIZE, self.body[0].y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+        pygame.draw.rect(Screen, self.color, head_rect, border_radius=8)
+        
+        # Calculate eye positions based on direction
+        eye_color = (40, 40, 40)  # Dark eyes
+        eye_size = 6
+        eye_offset = 8
+        
+        # Base eye positions (when facing right)
+        left_eye_pos = (
+            self.body[0].x * CELL_SIZE + eye_offset,
+            self.body[0].y * CELL_SIZE + eye_offset
+        )
+        right_eye_pos = (
+            self.body[0].x * CELL_SIZE + eye_offset,
+            self.body[0].y * CELL_SIZE + CELL_SIZE - eye_offset
+        )
+        
+        # Adjust eye positions based on direction
+        if self.direction == Vector2(1, 0):  # Right
+            left_eye_pos = (self.body[0].x * CELL_SIZE + CELL_SIZE - eye_offset, 
+                          self.body[0].y * CELL_SIZE + eye_offset)
+            right_eye_pos = (self.body[0].x * CELL_SIZE + CELL_SIZE - eye_offset,
+                           self.body[0].y * CELL_SIZE + CELL_SIZE - eye_offset)
+        elif self.direction == Vector2(-1, 0):  # Left
+            left_eye_pos = (self.body[0].x * CELL_SIZE + eye_offset,
+                          self.body[0].y * CELL_SIZE + eye_offset)
+            right_eye_pos = (self.body[0].x * CELL_SIZE + eye_offset,
+                           self.body[0].y * CELL_SIZE + CELL_SIZE - eye_offset)
+        elif self.direction == Vector2(0, -1):  # Up
+            left_eye_pos = (self.body[0].x * CELL_SIZE + eye_offset,
+                          self.body[0].y * CELL_SIZE + eye_offset)
+            right_eye_pos = (self.body[0].x * CELL_SIZE + CELL_SIZE - eye_offset,
+                           self.body[0].y * CELL_SIZE + eye_offset)
+        else:  # Down
+            left_eye_pos = (self.body[0].x * CELL_SIZE + eye_offset,
+                          self.body[0].y * CELL_SIZE + CELL_SIZE - eye_offset)
+            right_eye_pos = (self.body[0].x * CELL_SIZE + CELL_SIZE - eye_offset,
+                           self.body[0].y * CELL_SIZE + CELL_SIZE - eye_offset)
+        
+        # Draw eyes
+        pygame.draw.circle(Screen, eye_color, left_eye_pos, eye_size)
+        pygame.draw.circle(Screen, eye_color, right_eye_pos, eye_size)
+        
+        # Draw tongue
+        tongue_color = (255, 100, 100)  # Pink tongue
+        tongue_start = (
+            self.body[0].x * CELL_SIZE + CELL_SIZE/2,
+            self.body[0].y * CELL_SIZE + CELL_SIZE/2
+        )
+        
+        # Calculate tongue end position based on direction
+        tongue_length = 10
+        tongue_fork = 4
+        if self.direction == Vector2(1, 0):  # Right
+            tongue_end = (tongue_start[0] + tongue_length, tongue_start[1])
+            fork1 = (tongue_end[0], tongue_end[1] - tongue_fork)
+            fork2 = (tongue_end[0], tongue_end[1] + tongue_fork)
+        elif self.direction == Vector2(-1, 0):  # Left
+            tongue_end = (tongue_start[0] - tongue_length, tongue_start[1])
+            fork1 = (tongue_end[0], tongue_end[1] - tongue_fork)
+            fork2 = (tongue_end[0], tongue_end[1] + tongue_fork)
+        elif self.direction == Vector2(0, -1):  # Up
+            tongue_end = (tongue_start[0], tongue_start[1] - tongue_length)
+            fork1 = (tongue_end[0] - tongue_fork, tongue_end[1])
+            fork2 = (tongue_end[0] + tongue_fork, tongue_end[1])
+        else:  # Down
+            tongue_end = (tongue_start[0], tongue_start[1] + tongue_length)
+            fork1 = (tongue_end[0] - tongue_fork, tongue_end[1])
+            fork2 = (tongue_end[0] + tongue_fork, tongue_end[1])
+        
+        # Draw forked tongue
+        pygame.draw.line(Screen, tongue_color, tongue_start, tongue_end, 2)
+        pygame.draw.line(Screen, tongue_color, tongue_end, fork1, 2)
+        pygame.draw.line(Screen, tongue_color, tongue_end, fork2, 2)
+    
+    def move(self):
+        if self.alive and self.stunned <= 0:
+            body_copy = self.body[:-1]
+            new_head = Vector2(self.body[0].x + self.direction.x, self.body[0].y + self.direction.y)
+            body_copy.insert(0, new_head)
+            self.body = body_copy[:]
+    
+    def grow(self):
+        self.body.append(self.body[-1])
+        self.score += 1
+    
+    def shoot_projectile(self):
+        if self.projectiles > 0 and self.projectile_cooldown <= 0:
+            self.projectiles -= 1
+            self.projectile_cooldown = PROJECTILE_COOLDOWN
+            return Projectile(self.body[0], self.direction, self)
+        return None
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
+    single_player = '--single-player' in sys.argv
+    if len(sys.argv) > 1 and sys.argv[1] != '--single-player':
         client = Client(host=sys.argv[1])
     else:
         client = Client()
+    
+    # Create room for single player mode
+    if single_player:
+        client.client.send(pickle.dumps({
+            "command": "create_room",
+            "room_name": "Single Player",
+            "single_player": True
+        }))
+        response = pickle.loads(client.client.recv(4096))
+        if response.get("command") == "room_created":
+            print("Created single player room")
+        else:
+            print("Failed to create single player room")
+            sys.exit(1)
+    
     client.run() 
