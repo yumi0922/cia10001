@@ -172,7 +172,10 @@ class Snake:
     def move(self):
         if self.alive and self.stunned <= 0:
             body_copy = self.body[:-1]
-            new_head = Vector2(self.body[0].x + self.direction.x, self.body[0].y + self.direction.y)
+            new_head = Vector2(
+                (self.body[0].x + self.direction.x) % CELL_NUMBER,
+                (self.body[0].y + self.direction.y) % CELL_NUMBER
+            )
             body_copy.insert(0, new_head)
             self.body = body_copy[:]
     
@@ -343,11 +346,6 @@ class Game:
             # Verify food isn't on snake after randomizing
             while self.food.pos in self.snake.body:
                 self.food.randomize()
-        
-        # Wall collision
-        if not (0 <= self.snake.body[0].x < CELL_NUMBER and 
-                0 <= self.snake.body[0].y < CELL_NUMBER):
-            self.game_over = True
         
         # Self collision
         if self.snake.body[0] in self.snake.body[1:]:

@@ -14,7 +14,17 @@ from pygame import gfxdraw
 from save_game import list_saves, load_game
 import single_player
 import snake_game
-from client import SnakeClient
+from client import Client
+
+# Constants
+CELL_SIZE = 30
+CELL_NUMBER = 25
+SCREEN_SIZE = CELL_SIZE * CELL_NUMBER
+
+# Button dimensions
+button_width = 200
+button_height = 60
+button_spacing = 20
 
 # Create assets directory if it doesn't exist
 os.makedirs('assets', exist_ok=True)
@@ -357,7 +367,6 @@ def create_buttons():
     ]
     
     # Calculate button positions
-    button_spacing = 20
     total_height = (button_height * len(buttons)) + (button_spacing * (len(buttons) - 1))
     start_y = (SCREEN_SIZE - total_height) // 2
     
